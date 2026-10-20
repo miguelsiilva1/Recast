@@ -70,13 +70,31 @@ function defaultTarget(info: FileInfo, remembered: Partial<Record<Kind, string>>
   return info.targets.find((t) => t !== ext) ?? info.targets[0] ?? "";
 }
 
+// Quality and output folder are remembered between launches; storage can be unavailable, so never let it throw.
+function loadSetting<T>(key: string, fallback: T): T {
+  try {
+    const raw = localStorage.getItem(key);
+    return raw === null ? fallback : (JSON.parse(raw) as T);
+  } catch {
+    return fallback;
+  }
+}
+
+function saveSetting(key: string, value: unknown) {
+  try {
+    localStorage.setItem(key, JSON.stringify(value));
+  } catch {
+    // Not critical: the setting just won't persist.
+  }
+}
+
 let nextId = 0;
 
 export default function App() {
   const [ffmpeg, setFfmpeg] = useState<string | null | undefined>(undefined);
   const [items, setItems] = useState<Item[]>([]);
-  const [quality, setQuality] = useState<Quality>("balanced");
-  const [outDir, setOutDir] = useState<string | null>(null);
+  const [quality, setQuality] = useState<Quality>(() => loadSetting("quality", "balanced"));
+  const [outDir, setOutDir] = useState<string | null>(() => loadSetting("outDir", null));
   const [dragging, setDragging] = useState(false);
   const itemsRef = useRef(items);
   const remembered = useRef<Partial<Record<Kind, string>>>({});
@@ -85,6 +103,9 @@ export default function App() {
 
   itemsRef.current = items;
   settings.current = { quality, outDir };
+
+  useEffect(() => saveSetting("quality", quality), [quality]);
+  useEffect(() => saveSetting("outDir", outDir), [outDir]);
 
   const update = (id: string, patch: Partial<Item>) =>
     setItems((list) => list.map((it) => (it.id === id ? { ...it, ...patch } : it)));
@@ -402,7 +423,7 @@ function Row({
         {item.status === "cancelled" && <span className="muted">Cancelled</span>}
         {item.status === "error" && (
           <span className="error" title={item.error}>
-            Failed: {item.error?.split("\n").pop()}
+            {item.error?.split("\n")[0]}
           </span>
         )}
       </div>

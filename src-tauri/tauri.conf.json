@@ -20,7 +20,17 @@
       }
     ],
     "security": {
-      "csp": null
+      "csp": {
+        "default-src": "'self'",
+        "connect-src": "'self' ipc: http://ipc.localhost",
+        "img-src": "'self' data:",
+        "style-src": "'self' 'unsafe-inline'",
+        "font-src": "'self' data:",
+        "object-src": "'none'",
+        "base-uri": "'none'",
+        "form-action": "'none'"
+      },
+      "devCsp": null
     }
   },
   "bundle": {
@@ -33,6 +43,10 @@
       "icons/icon.icns",
       "icons/icon.ico"
     ],
-    "license": "GPL-3.0-or-later"
+    "license": "GPL-3.0-or-later",
+    "category": "Utility",
+    "copyright": "Copyright \u00a9 2026 Miguel Silva",
+    "shortDescription": "Convert images, video, GIFs and audio offline",
+    "longDescription": "Recast converts images, video, animated GIFs and audio on your own computer using FFmpeg. No uploads, no file-size limits."
   }
 }

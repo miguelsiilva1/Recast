@@ -30,12 +30,12 @@ Recast is a small desktop app around [FFmpeg](https://ffmpeg.org):
 
 ## Features
 
-- Drag and drop files into the window, or pick them with the file browser
+- Drag and drop files or whole folders into the window (subfolders included), or pick files with the file browser
 - Batch conversion with a per-file output format, or **Convert all to…** in one click
 - Three quality presets: **High**, **Balanced** and **Small**
-- Save next to the original or to a folder of your choice
+- Save next to the original or to a folder of your choice; quality and folder are remembered between launches
 - Never overwrites anything: existing names get ` (1)`, ` (2)`… appended
-- Live progress for each file, with cancel
+- Live progress for each file, with cancel; quitting mid-conversion stops FFmpeg and removes the partial file
 - Transparent images turned into JPG get a white background instead of black
 - Light and dark mode follow your system setting
 
@@ -105,7 +105,7 @@ cd src-tauri
 cargo test
 ```
 
-The test suite generates a sample image, GIF, video and audio file, then converts each one to every format Recast offers using the real FFmpeg, at both the High and Small presets.
+The test suite generates 19 sample inputs (PNG, JPG, TIFF, BMP, TGA, AVIF, HEIC on macOS, GIF, APNG, MP4, MOV, MKV, WebM, AVI, WAV, MP3, FLAC, M4A, Opus), then converts each one to every format Recast offers using the real FFmpeg, at both the High and Small presets.
 
 ## How it works
 

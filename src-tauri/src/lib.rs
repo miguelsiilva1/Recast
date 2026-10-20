@@ -9,11 +9,19 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
-use tauri::{AppHandle, Emitter, State};
+use tauri::{AppHandle, Emitter, Manager, State};
 
 struct Running {
     child: Mutex<Child>,
+    output: PathBuf,
     cancelled: AtomicBool,
+}
+
+impl Running {
+    fn stop(&self) {
+        self.cancelled.store(true, Ordering::Relaxed);
+        let _ = self.child.lock().unwrap().kill();
+    }
 }
 
 struct AppState {
@@ -61,21 +69,45 @@ fn status(state: State<'_, AppState>) -> Status {
 
 #[tauri::command]
 fn inspect(state: State<'_, AppState>, paths: Vec<String>) -> Vec<FileInfo> {
-    paths
+    let mut files = Vec::new();
+    for p in paths {
+        let path = PathBuf::from(p);
+        if path.is_dir() {
+            collect_media(&path, &mut files);
+        } else if path.is_file() {
+            files.push(path);
+        }
+    }
+    files
         .into_iter()
-        .filter(|p| Path::new(p).is_file())
-        .map(|p| {
-            let path = Path::new(&p);
-            let kind = formats::kind_of(path);
+        .map(|path| {
+            let kind = formats::kind_of(&path);
             FileInfo {
                 name: path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default(),
                 size: path.metadata().map(|m| m.len()).unwrap_or(0),
                 targets: kind.map(|k| formats::targets(k, &state.encoders)).unwrap_or_default(),
                 kind,
-                path: p,
+                path: path.display().to_string(),
             }
         })
         .collect()
+}
+
+/// Supported files inside a dropped folder and its subfolders, skipping hidden entries.
+fn collect_media(dir: &Path, files: &mut Vec<PathBuf>) {
+    let Ok(entries) = std::fs::read_dir(dir) else { return };
+    let mut paths: Vec<PathBuf> = entries.filter_map(|e| e.ok().map(|e| e.path())).collect();
+    paths.sort();
+    for path in paths {
+        if path.file_name().is_some_and(|n| n.to_string_lossy().starts_with('.')) {
+            continue;
+        }
+        if path.is_dir() {
+            collect_media(&path, files);
+        } else if formats::kind_of(&path).is_some() {
+            files.push(path);
+        }
+    }
 }
 
 #[tauri::command]
@@ -109,7 +141,11 @@ async fn convert(app: AppHandle, state: State<'_, AppState>, job: Job) -> Result
     let stdout = child.stdout.take().unwrap();
     let stderr = child.stderr.take().unwrap();
 
-    let running = Arc::new(Running { child: Mutex::new(child), cancelled: AtomicBool::new(false) });
+    let running = Arc::new(Running {
+        child: Mutex::new(child),
+        output: output.clone(),
+        cancelled: AtomicBool::new(false),
+    });
     state.jobs.lock().unwrap().insert(job.id.clone(), running.clone());
 
     let id = job.id.clone();
@@ -131,8 +167,7 @@ async fn convert(app: AppHandle, state: State<'_, AppState>, job: Job) -> Result
 #[tauri::command]
 fn cancel(state: State<'_, AppState>, id: String) {
     if let Some(job) = state.jobs.lock().unwrap().get(&id) {
-        job.cancelled.store(true, Ordering::Relaxed);
-        let _ = job.child.lock().unwrap().kill();
+        job.stop();
     }
 }
 
@@ -178,10 +213,29 @@ fn run(
     if running.cancelled.load(Ordering::Relaxed) {
         Err("Cancelled".into())
     } else if !status.success() {
-        Err(if log.is_empty() { "FFmpeg failed".into() } else { log })
+        Err(explain(&log))
     } else {
         Ok(())
     }
+}
+
+/// Turns ffmpeg's log tail into a readable reason, keeping the raw log after a blank line.
+fn explain(log: &str) -> String {
+    let has = |s: &str| log.contains(s);
+    let reason = if has("Invalid data found") || has("moov atom not found") {
+        "The file is damaged or isn't the format its extension says."
+    } else if has("does not contain any stream") || has("matches no streams") {
+        "The file has no track that can be converted to this format."
+    } else if has("No space left") {
+        "Not enough disk space."
+    } else if has("Permission denied") {
+        "Recast isn't allowed to read the file or write to the output folder."
+    } else if has("No such file") {
+        "The file was moved or deleted."
+    } else {
+        "FFmpeg couldn't convert this file."
+    };
+    if log.is_empty() { reason.into() } else { format!("{reason}\n\n{log}") }
 }
 
 /// Creates an empty `<dir>/<stem>.<ext>`, adding " (1)", " (2)"… so nothing gets overwritten.
@@ -190,6 +244,9 @@ fn reserve_output(input: &Path, out_dir: Option<&str>, ext: &str) -> std::io::Re
     let dir = out_dir
         .map(PathBuf::from)
         .unwrap_or_else(|| input.parent().unwrap_or(Path::new(".")).to_path_buf());
+    if !dir.is_dir() {
+        return Err(std::io::Error::new(std::io::ErrorKind::NotFound, "the output folder no longer exists"));
+    }
     let stem = input.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or("output".into());
     for n in 0.. {
         let name = if n == 0 { format!("{stem}.{ext}") } else { format!("{stem} ({n}).{ext}") };
@@ -213,6 +270,16 @@ pub fn run_app() {
         .plugin(tauri_plugin_dialog::init())
         .manage(AppState { ffmpeg, encoders, jobs: Mutex::default() })
         .invoke_handler(tauri::generate_handler![status, inspect, convert, cancel])
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .build(tauri::generate_context!())
+        .expect("error while building tauri application")
+        .run(|app, event| {
+            // Quitting mid-conversion would otherwise leave ffmpeg running and a half-written file behind.
+            if let tauri::RunEvent::Exit = event {
+                for job in app.state::<AppState>().jobs.lock().unwrap().values() {
+                    job.stop();
+                    let _ = job.child.lock().unwrap().wait();
+                    let _ = std::fs::remove_file(&job.output);
+                }
+            }
+        });
 }

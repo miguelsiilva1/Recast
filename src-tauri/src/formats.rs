@@ -2,7 +2,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use std::path::Path;
 
-#[derive(Clone, Copy, PartialEq, Serialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Kind {
     Image,
@@ -189,20 +189,60 @@ mod tests {
         let dir = std::env::temp_dir().join("recast-test");
         std::fs::create_dir_all(&dir).unwrap();
 
-        let samples: [(Kind, &str, &[&str]); 4] = [
-            (Kind::Image, "in.png", &["-f", "lavfi", "-i", "testsrc=s=101x75", "-frames:v", "1"]),
-            (Kind::Animated, "in.gif", &["-f", "lavfi", "-i", "testsrc=d=1:s=99x75:r=10"]),
-            (Kind::Video, "in.mp4", &[
-                "-f", "lavfi", "-i", "testsrc=d=1:s=160x120", "-f", "lavfi", "-i", "sine=d=1", "-shortest",
-            ]),
-            (Kind::Audio, "in.wav", &["-f", "lavfi", "-i", "sine=d=1"]),
+        let image: &[&str] = &["-f", "lavfi", "-i", "testsrc=s=101x75", "-frames:v", "1"];
+        let animated: &[&str] = &["-f", "lavfi", "-i", "testsrc=d=1:s=99x75:r=10"];
+        let video: &[&str] =
+            &["-f", "lavfi", "-i", "testsrc=d=1:s=160x120", "-f", "lavfi", "-i", "sine=d=1", "-shortest"];
+        let audio: &[&str] = &["-f", "lavfi", "-i", "sine=d=1"];
+        let mut samples: Vec<(Kind, &str, &[&str])> = vec![
+            (Kind::Image, "in.png", image),
+            (Kind::Image, "in.jpg", image),
+            (Kind::Image, "in.tiff", image),
+            (Kind::Image, "in.bmp", image),
+            (Kind::Image, "in.tga", image),
+            (Kind::Image, "in.avif", image),
+            (Kind::Animated, "in.gif", animated),
+            (Kind::Animated, "in.apng", animated),
+            (Kind::Video, "in.mp4", video),
+            (Kind::Video, "in.mov", video),
+            (Kind::Video, "in.mkv", video),
+            (Kind::Video, "in.webm", video),
+            (Kind::Video, "in.avi", video),
+            (Kind::Audio, "in.wav", audio),
+            (Kind::Audio, "in.mp3", audio),
+            (Kind::Audio, "in.flac", audio),
+            (Kind::Audio, "in.m4a", audio),
+            (Kind::Audio, "in.opus", audio),
         ];
+        // Real HEIC (as iPhones write it) can only be produced with macOS's sips.
+        if cfg!(target_os = "macos") {
+            samples.push((Kind::Image, "in.heic", &[]));
+        }
 
         let mut failures = Vec::new();
         for (kind, name, source) in samples {
             let input = dir.join(name);
-            let ok = Command::new(&bin).args(["-hide_banner", "-loglevel", "error", "-y"]).args(source).arg(&input).status().unwrap();
-            assert!(ok.success(), "could not generate {name}");
+            let made = if source.is_empty() {
+                Command::new("sips")
+                    .args(["-s", "format", "heic"])
+                    .arg(dir.join("in.png"))
+                    .arg("--out")
+                    .arg(&input)
+                    .output()
+                    .is_ok_and(|o| o.status.success())
+            } else {
+                Command::new(&bin)
+                    .args(["-hide_banner", "-loglevel", "error", "-y"])
+                    .args(source)
+                    .arg(&input)
+                    .status()
+                    .is_ok_and(|s| s.success())
+            };
+            if !made {
+                eprintln!("could not generate {name} with this ffmpeg build, skipping");
+                continue;
+            }
+            assert_eq!(kind_of(&input), Some(kind), "{name} detected as the wrong kind");
 
             for target in targets(kind, &enc) {
                 for q in [Quality::High, Quality::Small] {
