@@ -3,7 +3,6 @@
   "productName": "Recast",
   "version": "0.1.0",
   "identifier": "com.miguelsilva.recast",
-  "license": "GPL-3.0-or-later",
   "build": {
     "beforeDevCommand": "npm run dev",
     "devUrl": "http://localhost:1420",
@@ -33,6 +32,7 @@
       "icons/128x128@2x.png",
       "icons/icon.icns",
       "icons/icon.ico"
-    ]
+    ],
+    "license": "GPL-3.0-or-later"
   }
 }

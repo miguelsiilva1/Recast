@@ -87,10 +87,14 @@ async fn convert(app: AppHandle, state: State<'_, AppState>, job: Job) -> Result
         return Err(format!("Can't convert this file to {}", job.target));
     }
     let args = formats::output_args(kind, &job.target, job.quality, &state.encoders);
-    let output = output_path(&input, job.out_dir.as_deref(), &job.target);
+    let output = reserve_output(&input, job.out_dir.as_deref(), &job.target)
+        .map_err(|e| format!("Could not create output file: {e}"))?;
 
+    // A renamed playlist (HLS, concat…) could make ffmpeg read other files or URLs,
+    // so only allow plain local files and the demuxers our supported formats need.
     let mut child = ffmpeg::command(&ffmpeg)
-        .args(["-hide_banner", "-nostdin", "-y", "-i"])
+        .args(["-hide_banner", "-nostdin", "-y"])
+        .args(["-protocol_whitelist", "file", "-format_whitelist", formats::DEMUXERS, "-i"])
         .arg(&input)
         .args(&args)
         .args(["-progress", "pipe:1", "-nostats"])
@@ -98,7 +102,10 @@ async fn convert(app: AppHandle, state: State<'_, AppState>, job: Job) -> Result
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
-        .map_err(|e| format!("Could not start FFmpeg: {e}"))?;
+        .map_err(|e| {
+            let _ = std::fs::remove_file(&output);
+            format!("Could not start FFmpeg: {e}")
+        })?;
     let stdout = child.stdout.take().unwrap();
     let stderr = child.stderr.take().unwrap();
 
@@ -177,19 +184,23 @@ fn run(
     }
 }
 
-/// `<dir>/<stem>.<ext>`, adding " (1)", " (2)"… so nothing gets overwritten.
-fn output_path(input: &Path, out_dir: Option<&str>, ext: &str) -> PathBuf {
+/// Creates an empty `<dir>/<stem>.<ext>`, adding " (1)", " (2)"… so nothing gets overwritten.
+/// `create_new` fails on anything already there, including symlinks, so ffmpeg only ever writes our own file.
+fn reserve_output(input: &Path, out_dir: Option<&str>, ext: &str) -> std::io::Result<PathBuf> {
     let dir = out_dir
         .map(PathBuf::from)
         .unwrap_or_else(|| input.parent().unwrap_or(Path::new(".")).to_path_buf());
     let stem = input.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or("output".into());
-    let mut path = dir.join(format!("{stem}.{ext}"));
-    let mut n = 1;
-    while path.exists() {
-        path = dir.join(format!("{stem} ({n}).{ext}"));
-        n += 1;
+    for n in 0.. {
+        let name = if n == 0 { format!("{stem}.{ext}") } else { format!("{stem} ({n}).{ext}") };
+        let path = dir.join(name);
+        match std::fs::OpenOptions::new().write(true).create_new(true).open(&path) {
+            Ok(_) => return Ok(path),
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(e) => return Err(e),
+        }
     }
-    path
+    unreachable!()
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]

@@ -43,6 +43,10 @@ pub fn kind_of(path: &Path) -> Option<Kind> {
     })
 }
 
+/// Demuxers ffmpeg may use to read inputs: exactly what the extensions in `kind_of` need, and no playlists.
+pub const DEMUXERS: &str = "mov,matroska,avi,flv,asf,mpeg,mpegts,ogg,mp3,wav,flac,aac,aiff,amr,gif,apng,\
+ico,image2,png_pipe,jpeg_pipe,webp_pipe,bmp_pipe,tiff_pipe";
+
 /// Output formats offered for each kind of input, in display order.
 fn candidates(kind: Kind) -> &'static [&'static str] {
     match kind {
@@ -204,7 +208,8 @@ mod tests {
                 for q in [Quality::High, Quality::Small] {
                     let output = dir.join(format!("out-{name}.{target}"));
                     let out = Command::new(&bin)
-                        .args(["-hide_banner", "-loglevel", "error", "-y", "-i"])
+                        .args(["-hide_banner", "-loglevel", "error", "-y"])
+                        .args(["-protocol_whitelist", "file", "-format_whitelist", DEMUXERS, "-i"])
                         .arg(&input)
                         .args(output_args(kind, &target, q, &enc))
                         .arg(&output)
@@ -218,5 +223,6 @@ mod tests {
             }
         }
         assert!(failures.is_empty(), "{}", failures.join("\n"));
+
     }
 }
