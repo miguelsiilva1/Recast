@@ -30,7 +30,8 @@ Recast is a small desktop app around [FFmpeg](https://ffmpeg.org):
 
 ## Features
 
-- Drag and drop files or whole folders into the window (subfolders included), or pick files with the file browser
+- Drag and drop files into the window, or pick them with the file browser
+- Drop a folder to browse its supported files (subfolders included) and pick only the ones you want
 - Batch conversion with a per-file output format, or **Convert all to…** in one click
 - Three quality presets: **High**, **Balanced** and **Small**
 - Save next to the original or to a folder of your choice; quality and folder are remembered between launches
@@ -152,15 +153,6 @@ To regenerate the platform icons after editing `assets/icon.svg`:
 rsvg-convert -w 1024 -h 1024 assets/icon.svg -o /tmp/icon.png
 npx tauri icon /tmp/icon.png
 ```
-
-## Roadmap
-
-- [ ] Bundle FFmpeg with the app, so no separate install is needed
-- [ ] GitHub Actions release builds for macOS (Apple Silicon + Intel), Windows and Linux
-- [ ] Presets for common targets (WhatsApp, Discord, web)
-- [ ] Trim, resize and frame-rate controls for video and GIF
-- [ ] Document conversion (DOCX, ODT → PDF) through LibreOffice when it's installed
-- [ ] Auto-updates
 
 ## Contributing
 

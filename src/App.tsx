@@ -1,22 +1,15 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { open } from "@tauri-apps/plugin-dialog";
 import { revealItemInDir } from "@tauri-apps/plugin-opener";
+import FolderPicker from "./FolderPicker";
+import { extOf, formatSize, KIND_LABEL, type FileInfo, type Kind, type Scan } from "./files";
 import "./App.css";
 
-type Kind = "image" | "animated" | "video" | "audio";
 type Quality = "high" | "balanced" | "small";
 type Status = "idle" | "queued" | "running" | "done" | "error" | "cancelled";
-
-type FileInfo = {
-  path: string;
-  name: string;
-  size: number;
-  kind: Kind | null;
-  targets: string[];
-};
 
 type Item = FileInfo & {
   id: string;
@@ -27,35 +20,11 @@ type Item = FileInfo & {
   error?: string;
 };
 
-const KIND_LABEL: Record<Kind, string> = {
-  image: "Image",
-  animated: "GIF",
-  video: "Video",
-  audio: "Audio",
-};
-
 const QUALITIES: { value: Quality; label: string; hint: string }[] = [
   { value: "high", label: "High", hint: "Best quality, bigger files" },
   { value: "balanced", label: "Balanced", hint: "Good quality, reasonable size" },
   { value: "small", label: "Small", hint: "Smallest files, visible loss" },
 ];
-
-function extOf(name: string) {
-  const dot = name.lastIndexOf(".");
-  return dot === -1 ? "" : name.slice(dot + 1).toLowerCase();
-}
-
-function formatSize(bytes: number) {
-  if (bytes < 1024) return `${bytes} B`;
-  const units = ["KB", "MB", "GB"];
-  let n = bytes / 1024;
-  let i = 0;
-  while (n >= 1024 && i < units.length - 1) {
-    n /= 1024;
-    i++;
-  }
-  return `${n.toFixed(n < 10 ? 1 : 0)} ${units[i]}`;
-}
 
 function folderName(path: string) {
   return path.split(/[\\/]/).filter(Boolean).pop() ?? path;
@@ -96,6 +65,7 @@ export default function App() {
   const [quality, setQuality] = useState<Quality>(() => loadSetting("quality", "balanced"));
   const [outDir, setOutDir] = useState<string | null>(() => loadSetting("outDir", null));
   const [dragging, setDragging] = useState(false);
+  const [picker, setPicker] = useState<Scan | null>(null);
   const itemsRef = useRef(items);
   const remembered = useRef<Partial<Record<Kind, string>>>({});
   const processing = useRef(false);
@@ -110,14 +80,12 @@ export default function App() {
   const update = (id: string, patch: Partial<Item>) =>
     setItems((list) => list.map((it) => (it.id === id ? { ...it, ...patch } : it)));
 
-  async function addPaths(paths: string[]) {
+  function appendFiles(infos: FileInfo[]) {
     const known = new Set(itemsRef.current.map((i) => i.path));
-    const fresh = paths.filter((p) => !known.has(p));
-    if (fresh.length === 0) return;
-    const infos = await invoke<FileInfo[]>("inspect", { paths: fresh });
+    const fresh = infos.filter((info) => !known.has(info.path));
     setItems((list) => [
       ...list,
-      ...infos.map((info) => ({
+      ...fresh.map((info) => ({
         ...info,
         id: String(nextId++),
         target: defaultTarget(info, remembered.current),
@@ -125,6 +93,23 @@ export default function App() {
         percent: 0,
       })),
     ]);
+  }
+
+  // Loose files go straight into the list; files found in dropped folders go to the picker first.
+  async function addPaths(paths: string[]) {
+    if (paths.length === 0) return;
+    const scan = await invoke<Scan>("inspect", { paths });
+    appendFiles(scan.files.filter((f) => f.relative === null));
+    if (scan.folders === 0) return;
+    const fromFolders = scan.files.filter((f) => f.relative !== null);
+    setPicker((prev) => {
+      const seen = new Set(prev?.files.map((f) => f.path));
+      return {
+        files: [...(prev?.files ?? []), ...fromFolders.filter((f) => !seen.has(f.path))],
+        folders: (prev?.folders ?? 0) + scan.folders,
+        truncated: (prev?.truncated ?? false) || scan.truncated,
+      };
+    });
   }
 
   useEffect(() => {
@@ -147,6 +132,8 @@ export default function App() {
       unlistenDrop.then((f) => f());
     };
   }, []);
+
+  const closePicker = useCallback(() => setPicker(null), []);
 
   async function browse() {
     const picked = await open({ multiple: true });
@@ -349,6 +336,18 @@ export default function App() {
             )}
           </footer>
         </>
+      )}
+
+      {picker && (
+        <FolderPicker
+          files={picker.files}
+          truncated={picker.truncated}
+          onAdd={(files) => {
+            appendFiles(files);
+            setPicker(null);
+          }}
+          onCancel={closePicker}
+        />
       )}
 
       {dragging && (

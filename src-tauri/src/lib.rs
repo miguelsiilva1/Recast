@@ -42,7 +42,20 @@ struct FileInfo {
     size: u64,
     kind: Option<Kind>,
     targets: Vec<String>,
+    /// Set for files found inside a dropped folder: their path starting at that folder's name.
+    relative: Option<String>,
 }
+
+#[derive(Serialize)]
+struct Scan {
+    files: Vec<FileInfo>,
+    /// How many of the given paths were folders.
+    folders: usize,
+    /// The folder scan stopped at MAX_FOLDER_FILES.
+    truncated: bool,
+}
+
+const MAX_FOLDER_FILES: usize = 5000;
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -68,46 +81,72 @@ fn status(state: State<'_, AppState>) -> Status {
 }
 
 #[tauri::command]
-fn inspect(state: State<'_, AppState>, paths: Vec<String>) -> Vec<FileInfo> {
-    let mut files = Vec::new();
-    for p in paths {
-        let path = PathBuf::from(p);
-        if path.is_dir() {
-            collect_media(&path, &mut files);
-        } else if path.is_file() {
-            files.push(path);
-        }
-    }
-    files
-        .into_iter()
-        .map(|path| {
-            let kind = formats::kind_of(&path);
-            FileInfo {
-                name: path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default(),
-                size: path.metadata().map(|m| m.len()).unwrap_or(0),
-                targets: kind.map(|k| formats::targets(k, &state.encoders)).unwrap_or_default(),
-                kind,
-                path: path.display().to_string(),
+async fn inspect(state: State<'_, AppState>, paths: Vec<String>) -> Result<Scan, String> {
+    let encoders = state.encoders.clone();
+    // Big folders can take a while to walk; keep it off the main thread.
+    tauri::async_runtime::spawn_blocking(move || {
+        let mut found: Vec<(PathBuf, Option<String>)> = Vec::new();
+        let mut truncated = false;
+        let mut folders = 0;
+        for p in paths {
+            let path = PathBuf::from(p);
+            if path.is_dir() {
+                folders += 1;
+                let base = path.parent().unwrap_or(&path).to_path_buf();
+                let mut inside = Vec::new();
+                truncated |= collect_media(&path, &mut inside, MAX_FOLDER_FILES);
+                found.extend(inside.into_iter().map(|f| {
+                    let rel = f.strip_prefix(&base).unwrap_or(&f).display().to_string();
+                    (f, Some(rel))
+                }));
+            } else if path.is_file() {
+                found.push((path, None));
             }
-        })
-        .collect()
+        }
+        let files = found
+            .into_iter()
+            .map(|(path, relative)| {
+                let kind = formats::kind_of(&path);
+                FileInfo {
+                    name: path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default(),
+                    size: path.metadata().map(|m| m.len()).unwrap_or(0),
+                    targets: kind.map(|k| formats::targets(k, &encoders)).unwrap_or_default(),
+                    kind,
+                    path: path.display().to_string(),
+                    relative,
+                }
+            })
+            .collect();
+        Scan { files, folders, truncated }
+    })
+    .await
+    .map_err(|e| e.to_string())
 }
 
-/// Supported files inside a dropped folder and its subfolders, skipping hidden entries.
-fn collect_media(dir: &Path, files: &mut Vec<PathBuf>) {
-    let Ok(entries) = std::fs::read_dir(dir) else { return };
-    let mut paths: Vec<PathBuf> = entries.filter_map(|e| e.ok().map(|e| e.path())).collect();
-    paths.sort();
-    for path in paths {
-        if path.file_name().is_some_and(|n| n.to_string_lossy().starts_with('.')) {
+/// Supported files inside a folder and its subfolders, skipping hidden entries and symlinked folders.
+/// Returns true when it stopped early because `limit` files were found.
+fn collect_media(dir: &Path, files: &mut Vec<PathBuf>, limit: usize) -> bool {
+    let Ok(entries) = std::fs::read_dir(dir) else { return false };
+    let mut entries: Vec<_> = entries.filter_map(Result::ok).collect();
+    entries.sort_by_key(|e| e.file_name());
+    for entry in entries {
+        if entry.file_name().to_string_lossy().starts_with('.') {
             continue;
         }
-        if path.is_dir() {
-            collect_media(&path, files);
+        let Ok(file_type) = entry.file_type() else { continue };
+        let path = entry.path();
+        if file_type.is_dir() {
+            if collect_media(&path, files, limit) {
+                return true;
+            }
         } else if formats::kind_of(&path).is_some() {
+            if files.len() >= limit {
+                return true;
+            }
             files.push(path);
         }
     }
+    false
 }
 
 #[tauri::command]
@@ -282,4 +321,38 @@ pub fn run_app() {
                 }
             }
         });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn folder_scan_finds_only_supported_visible_files() {
+        let root = std::env::temp_dir().join("recast-scan-test");
+        let _ = std::fs::remove_dir_all(&root);
+        for dir in ["Photos/2024", "Photos/.cache", "Photos/notes"] {
+            std::fs::create_dir_all(root.join(dir)).unwrap();
+        }
+        for file in [
+            "Photos/a.jpg",
+            "Photos/2024/b.MOV",
+            "Photos/2024/c.mp3",
+            "Photos/.hidden.png",
+            "Photos/.cache/d.png",
+            "Photos/notes/readme.txt",
+            "Photos/report.pdf",
+        ] {
+            std::fs::write(root.join(file), b"").unwrap();
+        }
+
+        let mut files = Vec::new();
+        assert!(!collect_media(&root.join("Photos"), &mut files, 100));
+        let names: Vec<_> = files.iter().map(|f| f.strip_prefix(&root).unwrap().display().to_string()).collect();
+        assert_eq!(names, ["Photos/2024/b.MOV", "Photos/2024/c.mp3", "Photos/a.jpg"]);
+
+        let mut limited = Vec::new();
+        assert!(collect_media(&root.join("Photos"), &mut limited, 2));
+        assert_eq!(limited.len(), 2);
+    }
 }
